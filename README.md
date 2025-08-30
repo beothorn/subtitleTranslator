@@ -29,6 +29,13 @@ subtra /path/to/video.mkv
 ```
 
 This creates `/path/to/video.srt` with Portuguese subtitles.
+Translate an existing SRT file:
+
+```bash
+subtra /path/to/subs.srt
+```
+
+This writes `/path/to/subs_pt_br.srt` without touching the original file.
 Progress is logged as a percentage, each batch of 50 lines (configurable with `--batch-size`) reports an estimated
 time remaining in minutes and seconds, and the tool saves a partial translation to
 `/path/to/video_partial_translation_pt_br`. If interrupted, re-running the same
