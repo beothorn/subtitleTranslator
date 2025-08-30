@@ -5,7 +5,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use subtra_core::translate::{openai::OpenAiTranslator, process_file};
 use subtra_core::video::extract_english_subtitles;
-use tracing::Level;
+use tracing_subscriber::EnvFilter;
 
 /// Command line options for the binary.
 #[derive(Parser)]
@@ -26,8 +26,20 @@ struct Cli {
 /// This function should initialize logging and delegate to the core library.
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let level = if cli.debug { Level::TRACE } else { Level::INFO };
-    tracing_subscriber::fmt().with_max_level(level).init();
+    let filter = if cli.debug {
+        EnvFilter::default()
+            .add_directive("subtra=trace".parse().unwrap())
+            .add_directive("subtra_core=trace".parse().unwrap())
+            .add_directive("info".parse().unwrap())
+    } else {
+        EnvFilter::default()
+            .add_directive("subtra=info".parse().unwrap())
+            .add_directive("subtra_core=info".parse().unwrap())
+            .add_directive("warn".parse().unwrap())
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .init();
     if cli.onlyextract {
         extract_english_subtitles(&cli.input)?;
     } else {

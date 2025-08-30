@@ -43,3 +43,4 @@ Show detailed logs for debugging:
 ```bash
 subtra --debug video.mkv
 ```
+This prints verbose progress messages for the translation pipeline while keeping third-party noise to a minimum.

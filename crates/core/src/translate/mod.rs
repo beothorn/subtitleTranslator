@@ -28,6 +28,7 @@ pub mod openai;
 /// This function should output the translated SRT alongside the input file.
 pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBuf> {
     trace!("process_file input={}", input.display());
+    info!("extracting English subtitles");
     let extracted = video::extract_english_subtitles(input)?;
     let temp = input.with_file_name(format!(
         "{}_temp_en.srt",
@@ -49,16 +50,30 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
             break;
         }
     }
+    info!("building glossary from sample");
     let summary = translator.build_glossary(&sample)?;
-    trace!("glossary_built");
+    info!("glossary built");
 
     let mut history: Vec<String> = Vec::new();
     let mut idx = 0;
     while idx < blocks.len() {
         let end = (idx + 10).min(blocks.len());
+        info!(
+            "translating lines {}-{} of {}",
+            idx + 1,
+            end,
+            blocks.len()
+        );
         let chunk = &mut blocks[idx..end];
         let english: Vec<String> = chunk.iter().map(|b| b.text.join("\n")).collect();
+        let start = std::time::Instant::now();
         let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        info!(
+            "translated lines {}-{} in {} ms",
+            idx + 1,
+            end,
+            start.elapsed().as_millis()
+        );
         for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
             block.text = text.lines().map(|s| s.to_string()).collect();
         }
@@ -70,8 +85,10 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
     }
 
     let out_path = input.with_extension("srt");
+    info!("writing output to {}", out_path.display());
     let out_content = srt::format(&blocks);
     fs::write(&out_path, out_content)?;
+    info!("removing temporary file");
     fs::remove_file(&temp)?;
     info!("wrote {}", out_path.display());
     Ok(out_path)

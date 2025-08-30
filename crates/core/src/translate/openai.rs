@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 /// Translator that delegates to the OpenAI chat completion API.
 pub struct OpenAiTranslator {
@@ -22,7 +22,10 @@ impl OpenAiTranslator {
         let key = std::env::var("OPENAI_API_KEY")?;
         let base = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com".to_string());
-        let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(45))
+            .build()?;
         debug!("using base_url={base}");
         Ok(Self {
             client,
@@ -36,6 +39,7 @@ impl OpenAiTranslator {
         trace!("post_chat");
         debug!(request = %body);
         let url = format!("{}/v1/chat/completions", self.base_url);
+        info!("sending request to OpenAI");
         let start = Instant::now();
         let resp = self
             .client
@@ -46,13 +50,19 @@ impl OpenAiTranslator {
         let resp = match resp {
             Ok(r) => r,
             Err(err) => {
-                debug!(?err, "openai request failed");
+                info!("openai request failed after {} ms", start.elapsed().as_millis());
+                debug!(?err);
                 return Err(err.into());
             }
         };
         let status = resp.status();
         let text = resp.text()?;
-        debug!(?status, elapsed_ms = start.elapsed().as_millis(), response = %text);
+        info!(
+            "openai responded in {} ms with status {}",
+            start.elapsed().as_millis(),
+            status
+        );
+        debug!(response = %text);
         if !status.is_success() {
             return Err(anyhow!("openai error: {status} {text}"));
         }
