@@ -10,4 +10,6 @@ Introduce a CLI path to extract subtitles, build a glossary from the first 15 li
 - Implemented OpenAI translator and translation pipeline.
 - Extended CLI to call translator when not in `--onlyextract` mode.
 - Documented translation feature and usage in README.
+- Configured HTTP client to use rustls and drop OpenSSL dependency.
 # Notes
+
