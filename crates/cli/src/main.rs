@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use subtra_core::translate::{openai::OpenAiTranslator, process_file};
+use subtra_core::translate::{openai::OpenAiTranslator, process_file, DEFAULT_BATCH_SIZE};
 use subtra_core::video::extract_english_subtitles;
 use tracing_subscriber::EnvFilter;
 
@@ -17,6 +17,10 @@ struct Cli {
     /// Enable verbose debug and trace logs.
     #[arg(long)]
     debug: bool,
+
+    /// Number of subtitle lines to translate per batch.
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    batch_size: usize,
 
     /// Path to the video file we want to process.
     input: PathBuf,
@@ -44,7 +48,7 @@ fn main() -> Result<()> {
         extract_english_subtitles(&cli.input)?;
     } else {
         let translator = OpenAiTranslator::new()?;
-        process_file(&cli.input, &translator)?;
+        process_file(&cli.input, &translator, cli.batch_size)?;
     }
     Ok(())
 }

@@ -7,7 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace};
 
-const BATCH_SIZE: usize = 30;
+/// Default number of subtitle lines translated per batch.
+pub const DEFAULT_BATCH_SIZE: usize = 50;
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
 pub trait Translator {
@@ -28,7 +29,11 @@ pub mod openai;
 
 /// Process a video file by extracting English subtitles and translating them.
 /// This function should output the translated SRT alongside the input file.
-pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBuf> {
+pub fn process_file(
+    input: &Path,
+    translator: &impl Translator,
+    batch_size: usize,
+) -> Result<PathBuf> {
     trace!("process_file input={}", input.display());
     info!("extracting English subtitles");
     let extracted = video::extract_english_subtitles(input)?;
@@ -69,7 +74,7 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
 
     let mut last_ms: Option<u128> = None;
     while idx < blocks.len() {
-        let end = (idx + BATCH_SIZE).min(blocks.len());
+        let end = (idx + batch_size).min(blocks.len());
         let progress = end * 100 / total;
         info!(
             "translating lines {}-{} of {} ({}%)",
@@ -84,7 +89,8 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
             .map(|b| b.text.join("\n"))
             .collect();
         let start = std::time::Instant::now();
-        let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        let translated =
+            translator.translate_batch(&summary, &history, &english, "pt-BR")?;
         let elapsed = start.elapsed().as_millis();
         info!("translated lines {}-{} in {} ms", idx + 1, end, elapsed);
         for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
@@ -98,7 +104,7 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         save_partial(&blocks, &partial_path)?;
         if let Some(prev) = last_ms {
             let remaining = blocks.len() - idx;
-            let estimate = estimate_remaining(prev, elapsed, remaining, BATCH_SIZE);
+            let estimate = estimate_remaining(prev, elapsed, remaining, batch_size);
             info!("ETA: {}", format_eta(estimate));
         }
         last_ms = Some(elapsed);
@@ -226,8 +232,8 @@ mod tests {
     /// Verify the time estimation uses the average of the last two calls and remaining batches.
     #[test]
     fn estimates_remaining_time() {
-        let ms = estimate_remaining(1000, 2000, 65, 30);
-        assert_eq!(ms, 4500);
+        let ms = estimate_remaining(1000, 2000, 65, 50);
+        assert_eq!(ms, 3000);
     }
 
     /// Ensure the ETA formatter outputs minutes and seconds.

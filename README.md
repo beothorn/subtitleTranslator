@@ -29,10 +29,11 @@ subtra /path/to/video.mkv
 ```
 
 This creates `/path/to/video.srt` with Portuguese subtitles.
-Progress is logged as a percentage, each batch of 30 lines reports an estimated
+Progress is logged as a percentage, each batch of 50 lines (configurable with `--batch-size`) reports an estimated
 time remaining in minutes and seconds, and the tool saves a partial translation to
 `/path/to/video_partial_translation_pt_br`. If interrupted, re-running the same
-command resumes from where it left off.
+command resumes from where it left off. The translator automatically retries
+OpenAI requests if they time out.
 
 Extract only the English subtitles from a video file:
 
@@ -48,3 +49,10 @@ Show detailed logs for debugging:
 subtra --debug video.mkv
 ```
 This prints verbose progress messages for the translation pipeline while keeping third-party noise to a minimum.
+
+Override the batch size if you want to translate a different number of lines per
+request:
+
+```bash
+subtra --batch-size 100 video.mkv
+```
