@@ -84,15 +84,9 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
             .map(|b| b.text.join("\n"))
             .collect();
         let start = std::time::Instant::now();
-        let translated =
-            translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
         let elapsed = start.elapsed().as_millis();
-        info!(
-            "translated lines {}-{} in {} ms",
-            idx + 1,
-            end,
-            elapsed
-        );
+        info!("translated lines {}-{} in {} ms", idx + 1, end, elapsed);
         for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
             block.text = text.lines().map(|s| s.to_string()).collect();
         }
@@ -105,7 +99,7 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         if let Some(prev) = last_ms {
             let remaining = blocks.len() - idx;
             let estimate = estimate_remaining(prev, elapsed, remaining, BATCH_SIZE);
-            info!("estimated {} s remaining", estimate / 1000);
+            info!("ETA: {}", format_eta(estimate));
         }
         last_ms = Some(elapsed);
         let done = idx * 100 / total;
@@ -176,6 +170,26 @@ fn estimate_remaining(prev_ms: u128, curr_ms: u128, remaining: usize, batch: usi
     avg * batches as u128
 }
 
+/// Format a duration in milliseconds as "X minute Y seconds".
+/// This helper is used to log a readable ETA for the translation loop.
+fn format_eta(ms: u128) -> String {
+    trace!("format_eta ms={}", ms);
+    let total_secs = ms / 1000;
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    if minutes > 0 {
+        format!(
+            "{} minute{} {} second{}",
+            minutes,
+            if minutes == 1 { "" } else { "s" },
+            seconds,
+            if seconds == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("{} second{}", seconds, if seconds == 1 { "" } else { "s" })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +228,12 @@ mod tests {
     fn estimates_remaining_time() {
         let ms = estimate_remaining(1000, 2000, 65, 30);
         assert_eq!(ms, 4500);
+    }
+
+    /// Ensure the ETA formatter outputs minutes and seconds.
+    #[test]
+    fn formats_eta() {
+        assert_eq!(format_eta(110_000), "1 minute 50 seconds");
+        assert_eq!(format_eta(45_000), "45 seconds");
     }
 }

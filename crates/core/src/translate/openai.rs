@@ -50,7 +50,10 @@ impl OpenAiTranslator {
         let resp = match resp {
             Ok(r) => r,
             Err(err) => {
-                info!("openai request failed after {} ms", start.elapsed().as_millis());
+                info!(
+                    "openai request failed after {} ms",
+                    start.elapsed().as_millis()
+                );
                 debug!(?err);
                 return Err(err.into());
             }
@@ -75,19 +78,24 @@ mod tests {
     use super::*;
     use httpmock::MockServer;
     use serde_json::json;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Verify that we can translate a batch using a mocked OpenAI server.
     #[test]
     fn translates_with_mock_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("OPENAI_API_KEY", "test");
         let server = MockServer::start();
         std::env::set_var("OPENAI_BASE_URL", server.base_url());
         let _m = server.mock(|when, then| {
             when.method(httpmock::Method::POST)
                 .path("/v1/chat/completions");
+            let content = serde_json::to_string(&json!({"lines": ["ola"]})).unwrap();
             then.status(200).json_body(json!({
                 "choices": [{
-                    "message": {"content": "{\"lines\": [\"ola\"]}"}
+                    "message": {"content": content}
                 }]
             }));
         });
@@ -96,6 +104,29 @@ mod tests {
             .translate_batch("sum", &[], &["hi".to_string()], "pt-BR")
             .unwrap();
         assert_eq!(out, vec!["ola".to_string()]);
+    }
+
+    /// Verify the glossary prompt mentions Brazilian Portuguese.
+    #[test]
+    fn glossary_mentions_language() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("OPENAI_API_KEY", "test");
+        let server = MockServer::start();
+        std::env::set_var("OPENAI_BASE_URL", server.base_url());
+        let m = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/chat/completions")
+                .body_contains("Brazilian Portuguese");
+            then.status(200).json_body(json!({
+                "choices": [{
+                    "message": {"content": "sum"}
+                }]
+            }));
+        });
+        let tr = OpenAiTranslator::new().unwrap();
+        let out = tr.build_glossary(&["hi".to_string()]).unwrap();
+        assert_eq!(out, "sum");
+        m.assert();
     }
 }
 
@@ -147,7 +178,7 @@ impl Translator for OpenAiTranslator {
         let messages = vec![
             json!({
                 "role": "system",
-                "content": "Summarize the video and provide a glossary to avoid mistranslations."
+                "content": "Summarize the video and provide a glossary to avoid mistranslations when translating to Brazilian Portuguese."
             }),
             json!({"role": "user", "content": text}),
         ];
