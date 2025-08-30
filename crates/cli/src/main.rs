@@ -5,6 +5,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use subtra_core::translate::{openai::OpenAiTranslator, process_file};
 use subtra_core::video::extract_english_subtitles;
+use tracing::Level;
 
 /// Command line options for the binary.
 #[derive(Parser)]
@@ -13,6 +14,10 @@ struct Cli {
     #[arg(long)]
     onlyextract: bool,
 
+    /// Enable verbose debug and trace logs.
+    #[arg(long)]
+    debug: bool,
+
     /// Path to the video file we want to process.
     input: PathBuf,
 }
@@ -20,8 +25,9 @@ struct Cli {
 /// Application entry point which parses CLI args and performs actions.
 /// This function should initialize logging and delegate to the core library.
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let level = if cli.debug { Level::TRACE } else { Level::INFO };
+    tracing_subscriber::fmt().with_max_level(level).init();
     if cli.onlyextract {
         extract_english_subtitles(&cli.input)?;
     } else {

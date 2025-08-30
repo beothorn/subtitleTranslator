@@ -5,6 +5,7 @@ use crate::{srt, video};
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{info, trace};
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
 pub trait Translator {
@@ -26,6 +27,7 @@ pub mod openai;
 /// Process a video file by extracting English subtitles and translating them.
 /// This function should output the translated SRT alongside the input file.
 pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBuf> {
+    trace!("process_file input={}", input.display());
     let extracted = video::extract_english_subtitles(input)?;
     let temp = input.with_file_name(format!(
         "{}_temp_en.srt",
@@ -48,6 +50,7 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         }
     }
     let summary = translator.build_glossary(&sample)?;
+    trace!("glossary_built");
 
     let mut history: Vec<String> = Vec::new();
     let mut idx = 0;
@@ -69,5 +72,7 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
     let out_path = input.with_extension("srt");
     let out_content = srt::format(&blocks);
     fs::write(&out_path, out_content)?;
+    fs::remove_file(&temp)?;
+    info!("wrote {}", out_path.display());
     Ok(out_path)
 }

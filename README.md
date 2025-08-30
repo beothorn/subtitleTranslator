@@ -37,3 +37,9 @@ subtra --onlyextract foo.mkv
 ```
 
 This will create `foo_en.srt` in the same directory.
+
+Show detailed logs for debugging:
+
+```bash
+subtra --debug video.mkv
+```
