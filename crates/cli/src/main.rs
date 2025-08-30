@@ -22,7 +22,7 @@ struct Cli {
     #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
     batch_size: usize,
 
-    /// Path to the video file we want to process.
+    /// Path to the video or SRT file we want to process.
     input: PathBuf,
 }
 
@@ -41,9 +41,7 @@ fn main() -> Result<()> {
             .add_directive("subtra_core=info".parse().unwrap())
             .add_directive("warn".parse().unwrap())
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     if cli.onlyextract {
         extract_english_subtitles(&cli.input)?;
     } else {

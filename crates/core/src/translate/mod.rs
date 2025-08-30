@@ -27,7 +27,8 @@ pub trait Translator {
 
 pub mod openai;
 
-/// Process a video file by extracting English subtitles and translating them.
+/// Process a video file or existing SRT by extracting or reading English
+/// subtitles and translating them.
 /// This function should output the translated SRT alongside the input file.
 pub fn process_file(
     input: &Path,
@@ -35,14 +36,24 @@ pub fn process_file(
     batch_size: usize,
 ) -> Result<PathBuf> {
     trace!("process_file input={}", input.display());
-    info!("extracting English subtitles");
-    let extracted = video::extract_english_subtitles(input)?;
-    let temp = input.with_file_name(format!(
-        "{}_temp_en.srt",
-        input.file_stem().unwrap_or_default().to_string_lossy()
-    ));
-    fs::rename(&extracted, &temp)?;
-    let content = fs::read_to_string(&temp)?;
+    // Detect whether the input is already an SRT file so we skip extraction.
+    let is_srt = input
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("srt"))
+        .unwrap_or(false);
+    let (content, temp) = if is_srt {
+        info!("reading English subtitles");
+        (fs::read_to_string(input)?, None)
+    } else {
+        info!("extracting English subtitles");
+        let extracted = video::extract_english_subtitles(input)?;
+        let temp = input.with_file_name(format!(
+            "{}_temp_en.srt",
+            input.file_stem().unwrap_or_default().to_string_lossy()
+        ));
+        fs::rename(&extracted, &temp)?;
+        (fs::read_to_string(&temp)?, Some(temp))
+    };
     let english_blocks = srt::parse(&content)?;
 
     let mut sample = Vec::new();
@@ -89,8 +100,7 @@ pub fn process_file(
             .map(|b| b.text.join("\n"))
             .collect();
         let start = std::time::Instant::now();
-        let translated =
-            translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
         let elapsed = start.elapsed().as_millis();
         info!("translated lines {}-{} in {} ms", idx + 1, end, elapsed);
         for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
@@ -112,12 +122,21 @@ pub fn process_file(
         info!("completed {done}%");
     }
 
-    let out_path = input.with_extension("srt");
+    let out_path = if is_srt {
+        input.with_file_name(format!(
+            "{}_pt_br.srt",
+            input.file_stem().unwrap_or_default().to_string_lossy()
+        ))
+    } else {
+        input.with_extension("srt")
+    };
     info!("writing output to {}", out_path.display());
     let out_content = srt::format(&blocks);
     fs::write(&out_path, out_content)?;
-    info!("removing temporary file");
-    fs::remove_file(&temp)?;
+    if let Some(t) = temp {
+        info!("removing temporary file");
+        fs::remove_file(t)?;
+    }
     if partial_path.exists() {
         info!("removing partial translation {}", partial_path.display());
         fs::remove_file(&partial_path)?;
@@ -199,6 +218,7 @@ fn format_eta(ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
 
     /// Ensure we can load a partial file and resume from the correct index.
@@ -241,5 +261,41 @@ mod tests {
     fn formats_eta() {
         assert_eq!(format_eta(110_000), "1 minute 50 seconds");
         assert_eq!(format_eta(45_000), "45 seconds");
+    }
+
+    /// Ensure we can translate an existing SRT file without extraction.
+    #[test]
+    fn translates_existing_srt() {
+        struct MockTr;
+        impl Translator for MockTr {
+            /// Pretend to build a glossary by returning a dummy summary.
+            fn build_glossary(&self, _sample: &[String]) -> Result<String> {
+                Ok("sum".into())
+            }
+
+            /// Translate by prefixing each line with `pt:`.
+            fn translate_batch(
+                &self,
+                _summary: &str,
+                _prev: &[String],
+                lines: &[String],
+                _target_locale: &str,
+            ) -> Result<Vec<String>> {
+                Ok(lines.iter().map(|l| format!("pt:{l}")).collect())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("orig.srt");
+        fs::write(
+            &path,
+            "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n2\n00:00:01,000 --> 00:00:02,000\nworld\n",
+        )
+        .unwrap();
+        let out = process_file(&path, &MockTr, 50).unwrap();
+        assert_eq!(out, dir.path().join("orig_pt_br.srt"));
+        let translated = fs::read_to_string(out).unwrap();
+        assert!(translated.contains("pt:hello"));
+        assert!(translated.contains("pt:world"));
     }
 }
