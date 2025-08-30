@@ -6,8 +6,9 @@ use std::process::Command;
 use tracing::trace;
 
 /// Build the ffmpeg arguments to extract English subtitles and the output path.
-/// The way this works is by mapping the English subtitle track and copying it to
-/// an SRT file with `_en` suffix.
+/// The way this works is by mapping the first English subtitle track and copying
+/// it to an SRT file with `_en` suffix. Selecting only the first track avoids
+/// errors when containers have multiple English subtitle streams.
 pub fn ffmpeg_extract_args(input: &Path) -> (PathBuf, Vec<String>) {
     let stem = input
         .file_stem()
@@ -19,7 +20,7 @@ pub fn ffmpeg_extract_args(input: &Path) -> (PathBuf, Vec<String>) {
         "-i".to_string(),
         input.display().to_string(),
         "-map".to_string(),
-        "0:s:m:language:eng".to_string(),
+        "0:m:language:eng:s:0".to_string(),
         "-c:s".to_string(),
         "copy".to_string(),
         out.display().to_string(),
@@ -52,20 +53,18 @@ mod tests {
         let input = Path::new("foo.mkv");
         let (out, args) = ffmpeg_extract_args(input);
         assert_eq!(out, PathBuf::from("foo_en.srt"));
-        assert_eq!(
-            args,
-            vec![
-                "-i",
-                "foo.mkv",
-                "-map",
-                "0:s:m:language:eng",
-                "-c:s",
-                "copy",
-                "foo_en.srt"
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-        );
+        let expected = [
+            "-i",
+            "foo.mkv",
+            "-map",
+            "0:m:language:eng:s:0",
+            "-c:s",
+            "copy",
+            "foo_en.srt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+        assert_eq!(args, expected);
     }
 }
