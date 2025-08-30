@@ -34,7 +34,7 @@ impl OpenAiTranslator {
         let timeout = std::env::var("OPENAI_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(90);
+            .unwrap_or(180);
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(timeout))
@@ -241,25 +241,29 @@ impl Translator for OpenAiTranslator {
     ) -> Result<Vec<IndexedLine>> {
         trace!("translate_batch lines={} prev={}", lines.len(), prev.len());
         let prev_text = prev.join("\n");
-        let curr_text = lines
-            .iter()
-            .map(|l| format!("{}\n{}", l.index, l.text))
-            .collect::<Vec<_>>()
-            .join("\n----\n");
-        let example_in = r#"1
-00:00:05,105 --> 00:00:06,306
-<i>- Previously on</i>
-<i>"President Alien"...</i>
-
-2
-00:00:07,240 --> 00:00:09,109
-<i>- There is a deadly blob</i> 
-<i>running around.</i>
-
-3
-00:00:09,209 --> 00:00:10,844
-- I called in
-Agent Baxter Boy"#;
+        let curr_json = json!({
+            "translatedLines": lines
+                .iter()
+                .map(|l| json!({
+                    "index": l.index.to_string(),
+                    "translation": l.text.clone(),
+                }))
+                .collect::<Vec<_>>()
+        });
+        let curr_text = serde_json::to_string_pretty(&curr_json)?;
+        let example_in = r#"{
+  "translatedLines" :[
+    {
+      "index": "1",
+      "translation": "<i>- Previously on</i> \n<i>\"President Alien\"...</i>"
+    },{
+      "index": "2",
+      "translation": "<i>- There is a deadly blob</i>\n<i>running around.</i>"
+    },{
+      "index": "3",
+      "translation": "- I called in\nAgent Baxter Boy"
+    }]
+}"#;
         let example_out = r#"{
   "translatedLines" :[
     {
