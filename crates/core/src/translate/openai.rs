@@ -3,7 +3,8 @@
 
 use super::{IndexedLine, Translator};
 use anyhow::{anyhow, Result};
-use reqwest::blocking::Client;
+use async_trait::async_trait;
+use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
@@ -18,6 +19,7 @@ fn with_language(template: &str, language: &str) -> String {
 }
 
 /// Translator that delegates to the OpenAI chat completion API.
+#[derive(Clone)]
 pub struct OpenAiTranslator {
     client: Client,
     api_key: String,
@@ -48,7 +50,7 @@ impl OpenAiTranslator {
     }
 
     /// Send a JSON body to the chat completions endpoint and return the JSON response.
-    fn post_chat(&self, body: Value) -> Result<Value> {
+    async fn post_chat(&self, body: Value) -> Result<Value> {
         trace!("post_chat");
         debug!(request = %body);
         let url = format!("{}/v1/chat/completions", self.base_url);
@@ -60,7 +62,8 @@ impl OpenAiTranslator {
                 .post(&url)
                 .bearer_auth(&self.api_key)
                 .json(&body)
-                .send();
+                .send()
+                .await;
             let resp = match resp {
                 Ok(r) => r,
                 Err(err) => {
@@ -81,7 +84,7 @@ impl OpenAiTranslator {
                 }
             };
             let status = resp.status();
-            let text = resp.text()?;
+            let text = resp.text().await?;
             info!(
                 "openai responded in {} ms with status {}",
                 start.elapsed().as_millis(),
@@ -106,8 +109,8 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Verify that we can translate a batch using a mocked OpenAI server.
-    #[test]
-    fn translates_with_mock_server() {
+    #[tokio::test]
+    async fn translates_with_mock_server() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("OPENAI_API_KEY", "test");
         let server = MockServer::start();
@@ -136,6 +139,7 @@ mod tests {
                 }],
                 "pt-BR",
             )
+            .await
             .unwrap();
         assert_eq!(
             out,
@@ -147,8 +151,8 @@ mod tests {
     }
 
     /// Verify the glossary prompt mentions Brazilian Portuguese.
-    #[test]
-    fn glossary_mentions_language() {
+    #[tokio::test]
+    async fn glossary_mentions_language() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("OPENAI_API_KEY", "test");
         let server = MockServer::start();
@@ -164,14 +168,14 @@ mod tests {
             }));
         });
         let tr = OpenAiTranslator::new().unwrap();
-        let out = tr.build_glossary(&["hi".to_string()]).unwrap();
+        let out = tr.build_glossary(&["hi".to_string()]).await.unwrap();
         assert_eq!(out, "sum");
         m.assert();
     }
 
     /// Ensure we retry when the first request times out.
-    #[test]
-    fn retries_on_timeout() {
+    #[tokio::test]
+    async fn retries_on_timeout() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("OPENAI_API_KEY", "test");
         std::env::set_var("OPENAI_TIMEOUT_SECS", "1");
@@ -218,6 +222,7 @@ mod tests {
                 }],
                 "pt-BR",
             )
+            .await
             .unwrap();
         assert_eq!(
             out,
@@ -230,9 +235,10 @@ mod tests {
     }
 }
 
+#[async_trait]
 impl Translator for OpenAiTranslator {
     /// Translate a batch of subtitle lines, using summary and previous context.
-    fn translate_batch(
+    async fn translate_batch(
         &self,
         summary: &str,
         prev: &[String],
@@ -297,7 +303,7 @@ impl Translator for OpenAiTranslator {
             "response_format": {"type": "json_object"},
             "messages": messages,
         });
-        let value = self.post_chat(body)?;
+        let value = self.post_chat(body).await?;
         let content = value["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| anyhow!("missing content"))?;
@@ -315,7 +321,7 @@ impl Translator for OpenAiTranslator {
             .collect())
     }
     /// Ask OpenAI for a summary and glossary based on sample lines.
-    fn build_glossary(&self, sample: &[String]) -> Result<String> {
+    async fn build_glossary(&self, sample: &[String]) -> Result<String> {
         trace!("build_glossary sample_lines={}", sample.len());
         let text = sample.join("\n");
         let system_prompt = with_language(
@@ -330,7 +336,7 @@ impl Translator for OpenAiTranslator {
             "model": "gpt-5-nano",
             "messages": messages,
         });
-        let value = self.post_chat(body)?;
+        let value = self.post_chat(body).await?;
         let content = value["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| anyhow!("missing content"))?;

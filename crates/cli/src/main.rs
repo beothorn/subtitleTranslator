@@ -28,7 +28,8 @@ struct Cli {
 
 /// Application entry point which parses CLI args and performs actions.
 /// This function should initialize logging and delegate to the core library.
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     let filter = if cli.debug {
         EnvFilter::default()
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
         extract_english_subtitles(&cli.input)?;
     } else {
         let translator = OpenAiTranslator::new()?;
-        process_file(&cli.input, &translator, cli.batch_size)?;
+        process_file(&cli.input, translator, cli.batch_size).await?;
     }
     Ok(())
 }

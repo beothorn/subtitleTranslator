@@ -3,7 +3,9 @@
 
 use crate::{srt, video};
 use anyhow::Result;
-use std::collections::HashMap;
+use async_trait::async_trait;
+use futures::{stream::FuturesUnordered, StreamExt};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace};
@@ -22,9 +24,10 @@ pub struct IndexedLine {
 }
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
-pub trait Translator {
+#[async_trait]
+pub trait Translator: Send + Sync + Clone {
     /// Translate `lines` to the target locale preserving line boundaries.
-    fn translate_batch(
+    async fn translate_batch(
         &self,
         summary: &str,
         prev: &[String],
@@ -33,7 +36,7 @@ pub trait Translator {
     ) -> Result<Vec<IndexedLine>>;
 
     /// Build a glossary and summary from a sample of lines.
-    fn build_glossary(&self, sample: &[String]) -> Result<String>;
+    async fn build_glossary(&self, sample: &[String]) -> Result<String>;
 }
 
 pub mod openai;
@@ -41,11 +44,10 @@ pub mod openai;
 /// Process a video file or existing SRT by extracting or reading English
 /// subtitles and translating them.
 /// This function should output the translated SRT alongside the input file.
-pub fn process_file(
-    input: &Path,
-    translator: &impl Translator,
-    batch_size: usize,
-) -> Result<PathBuf> {
+pub async fn process_file<T>(input: &Path, translator: T, batch_size: usize) -> Result<PathBuf>
+where
+    T: Translator + Send + Sync + Clone + 'static,
+{
     trace!("process_file input={}", input.display());
     // Detect whether the input is already an SRT file so we skip extraction.
     let is_srt = input
@@ -80,64 +82,72 @@ pub fn process_file(
         }
     }
     info!("building glossary from sample");
-    let summary = translator.build_glossary(&sample)?;
+    let summary = translator.clone().build_glossary(&sample).await?;
     info!("glossary built");
 
     let partial_path = input.with_file_name(format!(
         "{}_partial_translation_pt_br",
         input.file_stem().unwrap_or_default().to_string_lossy()
     ));
-    let (mut blocks, mut idx, mut history) = load_partial(&english_blocks, &partial_path)?;
+    let (mut blocks, idx, _) = load_partial(&english_blocks, &partial_path)?;
     let total = blocks.len();
     if idx > 0 {
         let done = idx * 100 / total;
         info!("resuming at {done}%");
     }
 
-    let mut last_ms: Option<u128> = None;
-    while idx < blocks.len() {
-        let end = (idx + batch_size).min(blocks.len());
-        let progress = end * 100 / total;
-        info!(
-            "translating lines {}-{} of {} ({}%)",
-            idx + 1,
-            end,
-            total,
-            progress
-        );
-        let chunk = &mut blocks[idx..end];
-        let english: Vec<IndexedLine> = english_blocks[idx..end]
+    let mut futures = FuturesUnordered::new();
+    for start in (idx..english_blocks.len()).step_by(batch_size) {
+        let end = (start + batch_size).min(english_blocks.len());
+        let prev_start = start.saturating_sub(4);
+        let prev: Vec<String> = english_blocks[prev_start..start]
+            .iter()
+            .map(|b| b.text.join("\n"))
+            .collect();
+        let lines: Vec<IndexedLine> = english_blocks[start..end]
             .iter()
             .map(|b| IndexedLine {
                 index: b.index,
                 text: b.text.join("\n"),
             })
             .collect();
-        let start = std::time::Instant::now();
-        let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
-        let elapsed = start.elapsed().as_millis();
-        info!("translated lines {}-{} in {} ms", idx + 1, end, elapsed);
-        let mut map: HashMap<u32, String> =
-            translated.into_iter().map(|l| (l.index, l.text)).collect();
-        for block in chunk.iter_mut() {
-            if let Some(text) = map.remove(&block.index) {
-                block.text = text.lines().map(|s| s.to_string()).collect();
+        let tr = translator.clone();
+        let sum = summary.clone();
+        futures.push(async move {
+            let begin = std::time::Instant::now();
+            let translated = tr.translate_batch(&sum, &prev, &lines, "pt-BR").await?;
+            let elapsed = begin.elapsed().as_millis();
+            Ok::<_, anyhow::Error>((start, translated, elapsed))
+        });
+    }
+
+    let mut pending: BTreeMap<usize, (Vec<IndexedLine>, u128)> = BTreeMap::new();
+    let mut next = idx;
+    let mut last_ms: Option<u128> = None;
+    while let Some(res) = futures.next().await {
+        let (start_idx, translated, elapsed) = res?;
+        pending.insert(start_idx, (translated, elapsed));
+        while let Some((lines, elapsed)) = pending.remove(&next) {
+            let end = next + lines.len();
+            info!("translated lines {}-{} in {} ms", next + 1, end, elapsed);
+            let mut map: HashMap<u32, String> =
+                lines.into_iter().map(|l| (l.index, l.text)).collect();
+            for block in blocks[next..end].iter_mut() {
+                if let Some(text) = map.remove(&block.index) {
+                    block.text = text.lines().map(|s| s.to_string()).collect();
+                }
             }
+            save_partial(&blocks, &partial_path)?;
+            if let Some(prev) = last_ms {
+                let remaining = blocks.len() - end;
+                let estimate = estimate_remaining(prev, elapsed, remaining, batch_size);
+                info!("ETA: {}", format_eta(estimate));
+            }
+            last_ms = Some(elapsed);
+            next = end;
+            let done = next * 100 / total;
+            info!("completed {done}%");
         }
-        history.extend(english.into_iter().map(|l| l.text));
-        if history.len() > 4 {
-            history = history[history.len() - 4..].to_vec();
-        }
-        idx = end;
-        save_partial(&blocks, &partial_path)?;
-        if let Some(prev) = last_ms {
-            let remaining = blocks.len() - idx;
-            let estimate = estimate_remaining(prev, elapsed, remaining, batch_size);
-            info!("ETA: {}", format_eta(estimate));
-        }
-        last_ms = Some(elapsed);
-        let done = idx * 100 / total;
-        info!("completed {done}%");
     }
 
     let out_path = if is_srt {
@@ -236,6 +246,7 @@ fn format_eta(ms: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use std::fs;
     use tempfile::tempdir;
 
@@ -282,17 +293,19 @@ mod tests {
     }
 
     /// Ensure we can translate an existing SRT file without extraction.
-    #[test]
-    fn translates_existing_srt() {
+    #[tokio::test]
+    async fn translates_existing_srt() {
+        #[derive(Clone)]
         struct MockTr;
+        #[async_trait]
         impl Translator for MockTr {
             /// Pretend to build a glossary by returning a dummy summary.
-            fn build_glossary(&self, _sample: &[String]) -> Result<String> {
+            async fn build_glossary(&self, _sample: &[String]) -> Result<String> {
                 Ok("sum".into())
             }
 
             /// Translate by prefixing each line with `pt:` and keeping index.
-            fn translate_batch(
+            async fn translate_batch(
                 &self,
                 _summary: &str,
                 _prev: &[String],
@@ -316,7 +329,7 @@ mod tests {
             "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n2\n00:00:01,000 --> 00:00:02,000\nworld\n",
         )
         .unwrap();
-        let out = process_file(&path, &MockTr, 50).unwrap();
+        let out = process_file(&path, MockTr, 50).await.unwrap();
         assert_eq!(out, dir.path().join("orig_pt_br.srt"));
         let translated = fs::read_to_string(out).unwrap();
         assert!(translated.contains("pt:hello"));
