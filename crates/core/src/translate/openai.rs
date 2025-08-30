@@ -24,7 +24,7 @@ impl OpenAiTranslator {
             .unwrap_or_else(|_| "https://api.openai.com".to_string());
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(45))
+            .timeout(Duration::from_secs(90))
             .build()?;
         debug!("using base_url={base}");
         Ok(Self {

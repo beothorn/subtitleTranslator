@@ -5,7 +5,7 @@ use crate::{srt, video};
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{info, trace};
+use tracing::{debug, info, trace};
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
 pub trait Translator {
@@ -36,10 +36,10 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
     ));
     fs::rename(&extracted, &temp)?;
     let content = fs::read_to_string(&temp)?;
-    let mut blocks = srt::parse(&content)?;
+    let english_blocks = srt::parse(&content)?;
 
     let mut sample = Vec::new();
-    for block in &blocks {
+    for block in &english_blocks {
         for line in &block.text {
             if sample.len() >= 15 {
                 break;
@@ -54,20 +54,35 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
     let summary = translator.build_glossary(&sample)?;
     info!("glossary built");
 
-    let mut history: Vec<String> = Vec::new();
-    let mut idx = 0;
+    let partial_path = input.with_file_name(format!(
+        "{}_partial_translation_pt_br",
+        input.file_stem().unwrap_or_default().to_string_lossy()
+    ));
+    let (mut blocks, mut idx, mut history) = load_partial(&english_blocks, &partial_path)?;
+    let total = blocks.len();
+    if idx > 0 {
+        let done = idx * 100 / total;
+        info!("resuming at {done}%");
+    }
+
     while idx < blocks.len() {
         let end = (idx + 10).min(blocks.len());
+        let progress = end * 100 / total;
         info!(
-            "translating lines {}-{} of {}",
+            "translating lines {}-{} of {} ({}%)",
             idx + 1,
             end,
-            blocks.len()
+            total,
+            progress
         );
         let chunk = &mut blocks[idx..end];
-        let english: Vec<String> = chunk.iter().map(|b| b.text.join("\n")).collect();
+        let english: Vec<String> = english_blocks[idx..end]
+            .iter()
+            .map(|b| b.text.join("\n"))
+            .collect();
         let start = std::time::Instant::now();
-        let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        let translated =
+            translator.translate_batch(&summary, &history, &english, "pt-BR")?;
         info!(
             "translated lines {}-{} in {} ms",
             idx + 1,
@@ -82,6 +97,9 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
             history = history[history.len() - 4..].to_vec();
         }
         idx = end;
+        save_partial(&blocks, &partial_path)?;
+        let done = idx * 100 / total;
+        info!("completed {done}%");
     }
 
     let out_path = input.with_extension("srt");
@@ -90,6 +108,78 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
     fs::write(&out_path, out_content)?;
     info!("removing temporary file");
     fs::remove_file(&temp)?;
+    if partial_path.exists() {
+        info!("removing partial translation {}", partial_path.display());
+        fs::remove_file(&partial_path)?;
+    }
     info!("wrote {}", out_path.display());
     Ok(out_path)
+}
+
+/// Load an existing partial translation if available.
+/// This function should read a JSON file of blocks and compute the resume index and history.
+fn load_partial(
+    original: &[srt::SrtBlock],
+    path: &Path,
+) -> Result<(Vec<srt::SrtBlock>, usize, Vec<String>)> {
+    trace!("load_partial path={}", path.display());
+    if !path.exists() {
+        return Ok((original.to_vec(), 0, Vec::new()));
+    }
+    let text = fs::read_to_string(path)?;
+    let blocks: Vec<srt::SrtBlock> = serde_json::from_str(&text)?;
+    let mut idx = 0;
+    while idx < blocks.len() && blocks[idx].text != original[idx].text {
+        idx += 1;
+    }
+    let start = idx.saturating_sub(4);
+    let history = original[start..idx]
+        .iter()
+        .map(|b| b.text.join("\n"))
+        .collect();
+    Ok((blocks, idx, history))
+}
+
+/// Save the current translation progress to disk.
+/// The way this works is by serializing the blocks to JSON for later resumption.
+fn save_partial(blocks: &[srt::SrtBlock], path: &Path) -> Result<()> {
+    trace!("save_partial path={}", path.display());
+    let text = serde_json::to_string(blocks)?;
+    fs::write(path, text)?;
+    debug!("saved partial translation to {}", path.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Ensure we can load a partial file and resume from the correct index.
+    #[test]
+    fn resumes_from_partial() {
+        let blocks = vec![
+            srt::SrtBlock {
+                index: 1,
+                start_ms: 0,
+                end_ms: 1000,
+                text: vec!["a".into()],
+            },
+            srt::SrtBlock {
+                index: 2,
+                start_ms: 1000,
+                end_ms: 2000,
+                text: vec!["b".into()],
+            },
+        ];
+        let dir = tempdir().unwrap();
+        let partial = dir.path().join("video_partial_translation_pt_br");
+        let mut translated = blocks.clone();
+        translated[0].text = vec!["pt:a".into()];
+        save_partial(&translated, &partial).unwrap();
+        let (loaded, idx, history) = load_partial(&blocks, &partial).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(history, vec!["a".to_string()]);
+        assert_eq!(loaded[0].text, vec!["pt:a".to_string()]);
+    }
 }

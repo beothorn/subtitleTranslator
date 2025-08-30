@@ -2,9 +2,10 @@
 //! It exposes helpers to read and write SRT blocks while preserving timing.
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 
 /// Represents a single SRT block (index, time range, text lines).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SrtBlock {
     pub index: u32,
     pub start_ms: u64,
