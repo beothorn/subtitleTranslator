@@ -2,12 +2,13 @@
 //! This module wires subtitle parsing, OpenAI calls and output writing.
 
 use crate::{srt, video};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures::{stream::FuturesUnordered, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+use tokio::sync::mpsc;
 use tracing::{debug, info, trace};
 
 /// Default number of subtitle lines translated per batch.
@@ -96,7 +97,7 @@ where
         info!("resuming at {done}%");
     }
 
-    let mut futures = FuturesUnordered::new();
+    let (tx, mut rx) = mpsc::channel(english_blocks.len());
     for start in (idx..english_blocks.len()).step_by(batch_size) {
         let end = (start + batch_size).min(english_blocks.len());
         let prev_start = start.saturating_sub(4);
@@ -113,19 +114,21 @@ where
             .collect();
         let tr = translator.clone();
         let sum = summary.clone();
-        futures.push(async move {
-            let begin = std::time::Instant::now();
-            let translated = tr.translate_batch(&sum, &prev, &lines, "pt-BR").await?;
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let begin = Instant::now();
+            let res = tr.translate_batch(&sum, &prev, &lines, "pt-BR").await;
             let elapsed = begin.elapsed().as_millis();
-            Ok::<_, anyhow::Error>((start, translated, elapsed))
+            let _ = tx_clone.send((start, res, elapsed)).await;
         });
     }
+    drop(tx);
 
     let mut pending: BTreeMap<usize, (Vec<IndexedLine>, u128)> = BTreeMap::new();
     let mut next = idx;
     let mut last_ms: Option<u128> = None;
-    while let Some(res) = futures.next().await {
-        let (start_idx, translated, elapsed) = res?;
+    while let Some((start_idx, res, elapsed)) = rx.recv().await {
+        let translated = res?;
         pending.insert(start_idx, (translated, elapsed));
         while let Some((lines, elapsed)) = pending.remove(&next) {
             let end = next + lines.len();
@@ -140,14 +143,24 @@ where
             save_partial(&blocks, &partial_path)?;
             if let Some(prev) = last_ms {
                 let remaining = blocks.len() - end;
-                let estimate = estimate_remaining(prev, elapsed, remaining, batch_size);
-                info!("ETA: {}", format_eta(estimate));
+                if remaining > 0 {
+                    let estimate = estimate_remaining(prev, elapsed, remaining, batch_size);
+                    info!("ETA: {}", format_eta(estimate));
+                }
             }
             last_ms = Some(elapsed);
             next = end;
             let done = next * 100 / total;
             info!("completed {done}%");
         }
+    }
+
+    if blocks
+        .iter()
+        .zip(english_blocks.iter())
+        .any(|(b, e)| b.text == e.text)
+    {
+        return Err(anyhow!("some lines were not translated"));
     }
 
     let out_path = if is_srt {
