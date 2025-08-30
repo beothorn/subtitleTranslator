@@ -1,7 +1,7 @@
 //! OpenAI-backed translator implementation.
 //! This uses the GPT-5 nano model with JSON mode for subtitle translation.
 
-use super::Translator;
+use super::{IndexedLine, Translator};
 use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -106,7 +106,10 @@ mod tests {
         let _m = server.mock(|when, then| {
             when.method(httpmock::Method::POST)
                 .path("/v1/chat/completions");
-            let content = serde_json::to_string(&json!({"lines": ["ola"]})).unwrap();
+            let content = serde_json::to_string(&json!({
+                "translatedLines": [{"index": "1", "translation": "ola"}]
+            }))
+            .unwrap();
             then.status(200).json_body(json!({
                 "choices": [{
                     "message": {"content": content}
@@ -115,9 +118,23 @@ mod tests {
         });
         let tr = OpenAiTranslator::new().unwrap();
         let out = tr
-            .translate_batch("sum", &[], &["hi".to_string()], "pt-BR")
+            .translate_batch(
+                "sum",
+                &[],
+                &[IndexedLine {
+                    index: 1,
+                    text: "hi".into(),
+                }],
+                "pt-BR",
+            )
             .unwrap();
-        assert_eq!(out, vec!["ola".to_string()]);
+        assert_eq!(
+            out,
+            vec![IndexedLine {
+                index: 1,
+                text: "ola".to_string()
+            }]
+        );
     }
 
     /// Verify the glossary prompt mentions Brazilian Portuguese.
@@ -163,13 +180,18 @@ mod tests {
                 if i == 0 {
                     thread::sleep(std::time::Duration::from_millis(1500));
                 } else {
-                    let content = serde_json::to_string(&json!({"lines": ["ola"]})).unwrap();
+                    let content = serde_json::to_string(&json!({
+                        "translatedLines": [{"index": "1", "translation": "ola"}]
+                    }))
+                    .unwrap();
                     let body = serde_json::to_string(&json!({
                         "choices": [{"message": {"content": content}}]
-                    })).unwrap();
+                    }))
+                    .unwrap();
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(), body
+                        body.len(),
+                        body
                     );
                     stream.write_all(resp.as_bytes()).unwrap();
                 }
@@ -178,9 +200,23 @@ mod tests {
         std::env::set_var("OPENAI_BASE_URL", format!("http://{}", addr));
         let tr = OpenAiTranslator::new().unwrap();
         let out = tr
-            .translate_batch("sum", &[], &["hi".to_string()], "pt-BR")
+            .translate_batch(
+                "sum",
+                &[],
+                &[IndexedLine {
+                    index: 1,
+                    text: "hi".into(),
+                }],
+                "pt-BR",
+            )
             .unwrap();
-        assert_eq!(out, vec!["ola".to_string()]);
+        assert_eq!(
+            out,
+            vec![IndexedLine {
+                index: 1,
+                text: "ola".to_string()
+            }]
+        );
         std::env::remove_var("OPENAI_TIMEOUT_SECS");
     }
 }
@@ -191,20 +227,53 @@ impl Translator for OpenAiTranslator {
         &self,
         summary: &str,
         prev: &[String],
-        lines: &[String],
+        lines: &[IndexedLine],
         target_locale: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<IndexedLine>> {
         trace!("translate_batch lines={} prev={}", lines.len(), prev.len());
         let prev_text = prev.join("\n");
-        let curr_text = lines.join("\n----\n");
+        let curr_text = lines
+            .iter()
+            .map(|l| format!("{}\n{}", l.index, l.text))
+            .collect::<Vec<_>>()
+            .join("\n----\n");
+        let example_in = r#"1
+00:00:05,105 --> 00:00:06,306
+<i>- Previously on</i>
+<i>"President Alien"...</i>
+
+2
+00:00:07,240 --> 00:00:09,109
+<i>- There is a deadly blob</i> 
+<i>running around.</i>
+
+3
+00:00:09,209 --> 00:00:10,844
+- I called in
+Agent Baxter Boy"#;
+        let example_out = r#"{
+  "translatedLines" :[
+    {
+      "index": "1",
+      "translation": "<i>-Anteriormente em</i> \n<i>\"Presidente Alien\"...</i>"
+    },{
+      "index": "2",
+      "translation": "<i>- Tem um blob assassino</i>\n<i>à solta.</i>"
+    },{
+      "index": "3",
+      "translation": "- Eu chamei o \nAgente Baxter Boy"
+    }]
+}"#;
         let messages = vec![
             json!({
                 "role": "system",
-                "content": "You translate English subtitles to Brazilian Portuguese and return JSON {\"lines\": []}."
+                "content": "You translate English subtitles to Brazilian Portuguese and return JSON with translatedLines.",
             }),
             json!({
                 "role": "user",
-                "content": format!("Summary:\n{summary}\n\nPrevious lines:\n{prev_text}\n\nTranslate the following lines to {target_locale}. Return a JSON object with key 'lines' as an array, keeping order and line breaks. Lines:\n{curr_text}")
+                "content": format!(
+                    "Summary:\n{summary}\n\nPrevious lines:\n{prev_text}\n\nTranslate the following lines to {target_locale}. Each line starts with its SRT index. Return a JSON object with key 'translatedLines' as an array of objects with 'index' and 'translation'.\nExample input:\n{example_in}\n\nExample output:\n{example_out}\n\nLines:\n{curr_text}"
+                )
             }),
         ];
         let body = json!({
@@ -217,15 +286,18 @@ impl Translator for OpenAiTranslator {
             .as_str()
             .ok_or_else(|| anyhow!("missing content"))?;
         let data: Value = serde_json::from_str(content)?;
-        let arr = data["lines"]
+        let arr = data["translatedLines"]
             .as_array()
-            .ok_or_else(|| anyhow!("no lines"))?;
+            .ok_or_else(|| anyhow!("no translatedLines"))?;
         Ok(arr
             .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
+            .filter_map(|v| {
+                let idx = v["index"].as_str()?.parse().ok()?;
+                let text = v["translation"].as_str()?.to_string();
+                Some(IndexedLine { index: idx, text })
+            })
             .collect())
     }
-
     /// Ask OpenAI for a summary and glossary based on sample lines.
     fn build_glossary(&self, sample: &[String]) -> Result<String> {
         trace!("build_glossary sample_lines={}", sample.len());
