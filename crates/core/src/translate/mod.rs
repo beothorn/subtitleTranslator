@@ -3,6 +3,7 @@
 
 use crate::{srt, video};
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace};
@@ -11,15 +12,25 @@ use tracing::{debug, info, trace};
 pub const DEFAULT_BATCH_SIZE: usize = 50;
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
+/// Represents a single line paired with its SRT index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedLine {
+    /// SRT index associated with the line.
+    pub index: u32,
+    /// Text content of the line.
+    pub text: String,
+}
+
+/// Translates a batch of lines with optional context (e.g., previous lines).
 pub trait Translator {
     /// Translate `lines` to the target locale preserving line boundaries.
     fn translate_batch(
         &self,
         summary: &str,
         prev: &[String],
-        lines: &[String],
+        lines: &[IndexedLine],
         target_locale: &str,
-    ) -> Result<Vec<String>>;
+    ) -> Result<Vec<IndexedLine>>;
 
     /// Build a glossary and summary from a sample of lines.
     fn build_glossary(&self, sample: &[String]) -> Result<String>;
@@ -95,18 +106,25 @@ pub fn process_file(
             progress
         );
         let chunk = &mut blocks[idx..end];
-        let english: Vec<String> = english_blocks[idx..end]
+        let english: Vec<IndexedLine> = english_blocks[idx..end]
             .iter()
-            .map(|b| b.text.join("\n"))
+            .map(|b| IndexedLine {
+                index: b.index,
+                text: b.text.join("\n"),
+            })
             .collect();
         let start = std::time::Instant::now();
         let translated = translator.translate_batch(&summary, &history, &english, "pt-BR")?;
         let elapsed = start.elapsed().as_millis();
         info!("translated lines {}-{} in {} ms", idx + 1, end, elapsed);
-        for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
-            block.text = text.lines().map(|s| s.to_string()).collect();
+        let mut map: HashMap<u32, String> =
+            translated.into_iter().map(|l| (l.index, l.text)).collect();
+        for block in chunk.iter_mut() {
+            if let Some(text) = map.remove(&block.index) {
+                block.text = text.lines().map(|s| s.to_string()).collect();
+            }
         }
-        history.extend(english);
+        history.extend(english.into_iter().map(|l| l.text));
         if history.len() > 4 {
             history = history[history.len() - 4..].to_vec();
         }
@@ -273,15 +291,21 @@ mod tests {
                 Ok("sum".into())
             }
 
-            /// Translate by prefixing each line with `pt:`.
+            /// Translate by prefixing each line with `pt:` and keeping index.
             fn translate_batch(
                 &self,
                 _summary: &str,
                 _prev: &[String],
-                lines: &[String],
+                lines: &[IndexedLine],
                 _target_locale: &str,
-            ) -> Result<Vec<String>> {
-                Ok(lines.iter().map(|l| format!("pt:{l}")).collect())
+            ) -> Result<Vec<IndexedLine>> {
+                Ok(lines
+                    .iter()
+                    .map(|l| IndexedLine {
+                        index: l.index,
+                        text: format!("pt:{}", l.text),
+                    })
+                    .collect())
             }
         }
 
