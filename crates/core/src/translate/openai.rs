@@ -34,7 +34,7 @@ impl OpenAiTranslator {
         let timeout = std::env::var("OPENAI_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(90);
+            .unwrap_or(180);
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(timeout))
