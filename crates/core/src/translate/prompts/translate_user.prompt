@@ -1,0 +1,15 @@
+Summary:
+$SUMMARY
+
+Previous lines:
+$PREVIOUS_LINES
+
+Translate the following lines to $TARGET_LOCALE. Each line starts with its SRT index. Return a JSON object with key 'translatedLines' as an array of objects with 'index' and 'translation'.
+Example input:
+$EXAMPLE_IN
+
+Example output:
+$EXAMPLE_OUT
+
+Lines:
+$LINES

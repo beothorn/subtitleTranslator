@@ -8,6 +8,15 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
+/// Default human-readable language name used in prompts.
+const DEFAULT_LANGUAGE: &str = "Brazilian Portuguese";
+
+/// Replace the `$LANGUAGE` token in the provided template with `language`.
+fn with_language(template: &str, language: &str) -> String {
+    // Here we swap the language placeholder so prompts can be edited independently from code.
+    template.replace("$LANGUAGE", language)
+}
+
 /// Translator that delegates to the OpenAI chat completion API.
 pub struct OpenAiTranslator {
     client: Client,
@@ -264,17 +273,20 @@ Agent Baxter Boy"#;
       "translation": "- Eu chamei o \nAgente Baxter Boy"
     }]
 }"#;
+        let system_prompt = with_language(
+            include_str!("prompts/translate_system.prompt"),
+            DEFAULT_LANGUAGE,
+        );
+        let user_prompt = include_str!("prompts/translate_user.prompt")
+            .replace("$SUMMARY", summary)
+            .replace("$PREVIOUS_LINES", &prev_text)
+            .replace("$TARGET_LOCALE", target_locale)
+            .replace("$EXAMPLE_IN", example_in)
+            .replace("$EXAMPLE_OUT", example_out)
+            .replace("$LINES", &curr_text);
         let messages = vec![
-            json!({
-                "role": "system",
-                "content": "You translate English subtitles to Brazilian Portuguese and return JSON with translatedLines.",
-            }),
-            json!({
-                "role": "user",
-                "content": format!(
-                    "Summary:\n{summary}\n\nPrevious lines:\n{prev_text}\n\nTranslate the following lines to {target_locale}. Each line starts with its SRT index. Return a JSON object with key 'translatedLines' as an array of objects with 'index' and 'translation'.\nExample input:\n{example_in}\n\nExample output:\n{example_out}\n\nLines:\n{curr_text}"
-                )
-            }),
+            json!({ "role": "system", "content": system_prompt }),
+            json!({ "role": "user", "content": user_prompt }),
         ];
         let body = json!({
             "model": "gpt-5-nano",
@@ -302,12 +314,13 @@ Agent Baxter Boy"#;
     fn build_glossary(&self, sample: &[String]) -> Result<String> {
         trace!("build_glossary sample_lines={}", sample.len());
         let text = sample.join("\n");
+        let system_prompt = with_language(
+            include_str!("prompts/glossary_system.prompt"),
+            DEFAULT_LANGUAGE,
+        );
         let messages = vec![
-            json!({
-                "role": "system",
-                "content": "Summarize the video and provide a glossary to avoid mistranslations when translating to Brazilian Portuguese."
-            }),
-            json!({"role": "user", "content": text}),
+            json!({ "role": "system", "content": system_prompt }),
+            json!({ "role": "user", "content": text }),
         ];
         let body = json!({
             "model": "gpt-5-nano",
