@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, trace};
 
+const BATCH_SIZE: usize = 30;
+
 /// Translates a batch of lines with optional context (e.g., previous lines).
 pub trait Translator {
     /// Translate `lines` to the target locale preserving line boundaries.
@@ -65,8 +67,9 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         info!("resuming at {done}%");
     }
 
+    let mut last_ms: Option<u128> = None;
     while idx < blocks.len() {
-        let end = (idx + 10).min(blocks.len());
+        let end = (idx + BATCH_SIZE).min(blocks.len());
         let progress = end * 100 / total;
         info!(
             "translating lines {}-{} of {} ({}%)",
@@ -83,11 +86,12 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         let start = std::time::Instant::now();
         let translated =
             translator.translate_batch(&summary, &history, &english, "pt-BR")?;
+        let elapsed = start.elapsed().as_millis();
         info!(
             "translated lines {}-{} in {} ms",
             idx + 1,
             end,
-            start.elapsed().as_millis()
+            elapsed
         );
         for (block, text) in chunk.iter_mut().zip(translated.into_iter()) {
             block.text = text.lines().map(|s| s.to_string()).collect();
@@ -98,6 +102,12 @@ pub fn process_file(input: &Path, translator: &impl Translator) -> Result<PathBu
         }
         idx = end;
         save_partial(&blocks, &partial_path)?;
+        if let Some(prev) = last_ms {
+            let remaining = blocks.len() - idx;
+            let estimate = estimate_remaining(prev, elapsed, remaining, BATCH_SIZE);
+            info!("estimated {} s remaining", estimate / 1000);
+        }
+        last_ms = Some(elapsed);
         let done = idx * 100 / total;
         info!("completed {done}%");
     }
@@ -150,6 +160,22 @@ fn save_partial(blocks: &[srt::SrtBlock], path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Estimate remaining time in milliseconds for the translation.
+/// The way this works is by averaging `prev_ms` and `curr_ms` and
+/// multiplying by the number of batches left.
+fn estimate_remaining(prev_ms: u128, curr_ms: u128, remaining: usize, batch: usize) -> u128 {
+    trace!(
+        "estimate_remaining prev_ms={} curr_ms={} remaining={} batch={}",
+        prev_ms,
+        curr_ms,
+        remaining,
+        batch
+    );
+    let avg = (prev_ms + curr_ms) / 2;
+    let batches = (remaining + batch - 1) / batch;
+    avg * batches as u128
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +207,12 @@ mod tests {
         assert_eq!(idx, 1);
         assert_eq!(history, vec!["a".to_string()]);
         assert_eq!(loaded[0].text, vec!["pt:a".to_string()]);
+    }
+
+    /// Verify the time estimation uses the average of the last two calls and remaining batches.
+    #[test]
+    fn estimates_remaining_time() {
+        let ms = estimate_remaining(1000, 2000, 65, 30);
+        assert_eq!(ms, 4500);
     }
 }

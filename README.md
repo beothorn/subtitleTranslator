@@ -29,7 +29,8 @@ subtra /path/to/video.mkv
 ```
 
 This creates `/path/to/video.srt` with Portuguese subtitles.
-Progress is logged as a percentage and the tool saves a partial translation to
+Progress is logged as a percentage, each batch of 30 lines reports an estimated
+time remaining, and the tool saves a partial translation to
 `/path/to/video_partial_translation_pt_br`. If interrupted, re-running the same
 command resumes from where it left off.
 
