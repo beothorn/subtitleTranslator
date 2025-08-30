@@ -21,7 +21,16 @@ The binary will be at `target/release/subtra`.
 
 ## Usage
 
-Extract English subtitles from a video file:
+Translate a video to Brazilian Portuguese:
+
+```bash
+export OPENAI_API_KEY=...  # your OpenAI key
+subtra /path/to/video.mkv
+```
+
+This creates `/path/to/video.srt` with Portuguese subtitles.
+
+Extract only the English subtitles from a video file:
 
 ```bash
 subtra --onlyextract foo.mkv

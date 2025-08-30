@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+use subtra_core::translate::{openai::OpenAiTranslator, process_file};
 use subtra_core::video::extract_english_subtitles;
 
 /// Command line options for the binary.
@@ -23,6 +24,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.onlyextract {
         extract_english_subtitles(&cli.input)?;
+    } else {
+        let translator = OpenAiTranslator::new()?;
+        process_file(&cli.input, &translator)?;
     }
     Ok(())
 }
