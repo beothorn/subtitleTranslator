@@ -42,6 +42,31 @@ pub trait Translator: Send + Sync + Clone {
 
 pub mod openai;
 
+#[derive(Clone)]
+struct BatchJob {
+    start: usize,
+    prev: Vec<String>,
+    lines: Vec<IndexedLine>,
+}
+
+/// Spawn a new asynchronous producer for a translation batch.
+/// This function sends the translated lines back to the central consumer.
+fn spawn_batch<T: Translator + Send + Sync + Clone + 'static>(
+    job: BatchJob,
+    tr: T,
+    summary: String,
+    tx: mpsc::Sender<(usize, Result<Vec<IndexedLine>>, u128)>,
+) {
+    tokio::spawn(async move {
+        let begin = Instant::now();
+        let res = tr
+            .translate_batch(&summary, &job.prev, &job.lines, "pt-BR")
+            .await;
+        let elapsed = begin.elapsed().as_millis();
+        let _ = tx.send((job.start, res, elapsed)).await;
+    });
+}
+
 /// Process a video file or existing SRT by extracting or reading English
 /// subtitles and translating them.
 /// This function should output the translated SRT alongside the input file.
@@ -98,6 +123,7 @@ where
     }
 
     let (tx, mut rx) = mpsc::channel(english_blocks.len());
+    let mut jobs: HashMap<usize, BatchJob> = HashMap::new();
     for start in (idx..english_blocks.len()).step_by(batch_size) {
         let end = (start + batch_size).min(english_blocks.len());
         let prev_start = start.saturating_sub(4);
@@ -112,24 +138,49 @@ where
                 text: b.text.join("\n"),
             })
             .collect();
-        let tr = translator.clone();
-        let sum = summary.clone();
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            let begin = Instant::now();
-            let res = tr.translate_batch(&sum, &prev, &lines, "pt-BR").await;
-            let elapsed = begin.elapsed().as_millis();
-            let _ = tx_clone.send((start, res, elapsed)).await;
-        });
+        let job = BatchJob { start, prev, lines };
+        jobs.insert(start, job.clone());
+        spawn_batch(job, translator.clone(), summary.clone(), tx.clone());
     }
-    drop(tx);
 
     let mut pending: BTreeMap<usize, (Vec<IndexedLine>, u128)> = BTreeMap::new();
     let mut next = idx;
     let mut last_ms: Option<u128> = None;
-    while let Some((start_idx, res, elapsed)) = rx.recv().await {
-        let translated = res?;
-        pending.insert(start_idx, (translated, elapsed));
+    while next < english_blocks.len() {
+        let (start_idx, res, elapsed) = rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("translation channel closed unexpectedly"))?;
+        match res {
+            Ok(translated) => {
+                if let Some(job) = jobs.get(&start_idx) {
+                    if translated.len() != job.lines.len() {
+                        let end = start_idx + job.lines.len();
+                        info!(
+                            "retrying lines {}-{} due to incomplete response",
+                            start_idx + 1,
+                            end
+                        );
+                        spawn_batch(job.clone(), translator.clone(), summary.clone(), tx.clone());
+                        continue;
+                    }
+                }
+                pending.insert(start_idx, (translated, elapsed));
+            }
+            Err(err) => {
+                if let Some(job) = jobs.get(&start_idx) {
+                    let end = start_idx + job.lines.len();
+                    info!(
+                        "retrying lines {}-{} after error: {}",
+                        start_idx + 1,
+                        end,
+                        err
+                    );
+                    spawn_batch(job.clone(), translator.clone(), summary.clone(), tx.clone());
+                }
+                continue;
+            }
+        }
         while let Some((lines, elapsed)) = pending.remove(&next) {
             let end = next + lines.len();
             info!("translated lines {}-{} in {} ms", next + 1, end, elapsed);
@@ -261,6 +312,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     /// Ensure we can load a partial file and resume from the correct index.
@@ -347,5 +399,58 @@ mod tests {
         let translated = fs::read_to_string(out).unwrap();
         assert!(translated.contains("pt:hello"));
         assert!(translated.contains("pt:world"));
+    }
+
+    /// Ensure we retry a batch when the translator errors once.
+    #[tokio::test]
+    async fn retries_failed_batch() {
+        #[derive(Clone)]
+        struct FlakyTr {
+            attempts: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl Translator for FlakyTr {
+            /// Pretend to build a glossary by returning a dummy summary.
+            async fn build_glossary(&self, _sample: &[String]) -> Result<String> {
+                Ok("sum".into())
+            }
+
+            /// Fail the first batch translation and succeed on subsequent tries.
+            async fn translate_batch(
+                &self,
+                _summary: &str,
+                _prev: &[String],
+                lines: &[IndexedLine],
+                _target_locale: &str,
+            ) -> Result<Vec<IndexedLine>> {
+                let mut lock = self.attempts.lock().unwrap();
+                if *lock == 0 {
+                    *lock += 1;
+                    Err(anyhow!("boom"))
+                } else {
+                    Ok(lines
+                        .iter()
+                        .map(|l| IndexedLine {
+                            index: l.index,
+                            text: format!("pt:{}", l.text),
+                        })
+                        .collect())
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("orig.srt");
+        fs::write(
+            &path,
+            "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
+        )
+        .unwrap();
+        let tr = FlakyTr {
+            attempts: Arc::new(Mutex::new(0)),
+        };
+        let out = process_file(&path, tr, 50).await.unwrap();
+        let translated = fs::read_to_string(out).unwrap();
+        assert!(translated.contains("pt:hello"));
     }
 }
