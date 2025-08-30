@@ -4,7 +4,7 @@ $SUMMARY
 Previous lines:
 $PREVIOUS_LINES
 
-Translate the following lines to $TARGET_LOCALE. Each line starts with its SRT index. Return a JSON object with key 'translatedLines' as an array of objects with 'index' and 'translation'.
+Translate the JSON below to $TARGET_LOCALE. The object has key 'translatedLines' with items containing an 'index' (string) and a 'translation' field with English text. Translate only the 'translation' values and return the same JSON structure.
 Example input:
 $EXAMPLE_IN
 
