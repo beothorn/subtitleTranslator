@@ -3,7 +3,8 @@
 # What client asked
 Fix mp4 extraction failing when multiple English subtitle streams exist.
 # Technical solution
-Limit ffmpeg mapping to the first English subtitle track to avoid multiple-stream errors when writing SRT output.
+Use ffprobe to list subtitle streams, select the best English closed-caption track with a simple heuristic, then map that index when calling ffmpeg.
 # What changed
-- Updated ffmpeg arguments to map only the first English subtitle stream.
+- Probed subtitle streams with ffprobe and chose the most relevant English track.
+- Mapped the selected stream index when extracting subtitles.
 # Notes
