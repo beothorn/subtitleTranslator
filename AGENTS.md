@@ -138,6 +138,11 @@ Use a common logging engine. Recommended: [`tracing`](https://crates.io/crates/t
 
 Always add tests—both happy path and error cases. Ask yourself “what could go wrong?” then add a test to ensure good behavior.
 
+Always add comments on every test explaining with a good narrative what the test is intended to test.
+Test comments are allowed to be as verbose as needed to describe what is being tested.
+Tests should always test also edge cases, especially errors. What happens if a command fail? Or there is no data when data is expected?  
+The test ensures the app is well behaved and deals with tests (either logging or fixing the error).  
+
 Two styles:
 
 * **Technical**: “This function returns the color corresponding to code XYZ.”
