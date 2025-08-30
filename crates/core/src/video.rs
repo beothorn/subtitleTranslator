@@ -7,10 +7,9 @@ use std::process::Command;
 use tracing::trace;
 
 /// Represents a subtitle stream returned by ffprobe.
-/// This type holds the stream index and optional language and title tags.
+/// This type holds optional language and title tags.
 #[derive(Debug, Deserialize)]
 struct Stream {
-    index: usize,
     #[serde(default)]
     tags: Tags,
 }
@@ -36,9 +35,9 @@ pub fn ffmpeg_extract_args(input: &Path, stream_index: usize) -> (PathBuf, Vec<S
         "-i".to_string(),
         input.display().to_string(),
         "-map".to_string(),
-        format!("0:{}", stream_index),
+        format!("0:s:{}", stream_index),
         "-c:s".to_string(),
-        "copy".to_string(),
+        "srt".to_string(),
         out.display().to_string(),
     ];
     (out, args)
@@ -66,7 +65,7 @@ pub fn extract_english_subtitles(path: &Path) -> Result<PathBuf> {
 /// and picking the one that looks most like a closed caption track.
 fn best_english_stream(streams: &[Stream]) -> Option<usize> {
     let mut best: Option<(usize, i32)> = None;
-    for stream in streams {
+    for (i, stream) in streams.iter().enumerate() {
         let lang = stream
             .tags
             .language
@@ -86,7 +85,7 @@ fn best_english_stream(streams: &[Stream]) -> Option<usize> {
         };
         match best {
             Some((_, best_score)) if score <= best_score => {}
-            _ => best = Some((stream.index, score)),
+            _ => best = Some((i, score)),
         }
     }
     best.map(|(idx, _)| idx)
@@ -106,7 +105,7 @@ fn pick_subtitle_index(path: &Path) -> Result<usize> {
             "-select_streams",
             "s",
             "-show_entries",
-            "stream=index:stream_tags=language,title",
+            "stream_tags=language,title",
             "-of",
             "json",
             path.to_string_lossy().as_ref(),
@@ -137,10 +136,18 @@ mod tests {
         let input = Path::new("foo.mkv");
         let (out, args) = ffmpeg_extract_args(input, 3);
         assert_eq!(out, PathBuf::from("foo_en.srt"));
-        let expected = ["-i", "foo.mkv", "-map", "0:3", "-c:s", "copy", "foo_en.srt"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let expected = [
+            "-i",
+            "foo.mkv",
+            "-map",
+            "0:s:3",
+            "-c:s",
+            "srt",
+            "foo_en.srt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
         assert_eq!(args, expected);
     }
 
@@ -148,20 +155,18 @@ mod tests {
     fn picks_cc_stream_over_plain() {
         let streams = vec![
             Stream {
-                index: 2,
                 tags: Tags {
                     language: Some("eng".to_string()),
                     title: Some("English".to_string()),
                 },
             },
             Stream {
-                index: 3,
                 tags: Tags {
                     language: Some("eng".to_string()),
                     title: Some("English CC".to_string()),
                 },
             },
         ];
-        assert_eq!(best_english_stream(&streams), Some(3));
+        assert_eq!(best_english_stream(&streams), Some(1));
     }
 }
