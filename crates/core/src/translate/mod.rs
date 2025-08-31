@@ -7,12 +7,16 @@ use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, info, trace};
 
 /// Default number of subtitle lines translated per batch.
 pub const DEFAULT_BATCH_SIZE: usize = 50;
+
+/// Maximum number of concurrent translation requests.
+pub const MAX_CONCURRENT_BATCHES: usize = 4;
 
 /// Translates a batch of lines with optional context (e.g., previous lines).
 /// Represents a single line paired with its SRT index.
@@ -56,8 +60,10 @@ fn spawn_batch<T: Translator + Send + Sync + Clone + 'static>(
     tr: T,
     summary: String,
     tx: mpsc::Sender<(usize, Result<Vec<IndexedLine>>, u128)>,
+    sem: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
+        let _permit = sem.acquire_owned().await.expect("semaphore closed");
         let begin = Instant::now();
         let res = tr
             .translate_batch(&summary, &job.prev, &job.lines, "pt-BR")
@@ -123,6 +129,7 @@ where
     }
 
     let (tx, mut rx) = mpsc::channel(english_blocks.len());
+    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_BATCHES));
     let mut jobs: HashMap<usize, BatchJob> = HashMap::new();
     for start in (idx..english_blocks.len()).step_by(batch_size) {
         let end = (start + batch_size).min(english_blocks.len());
@@ -140,7 +147,13 @@ where
             .collect();
         let job = BatchJob { start, prev, lines };
         jobs.insert(start, job.clone());
-        spawn_batch(job, translator.clone(), summary.clone(), tx.clone());
+        spawn_batch(
+            job,
+            translator.clone(),
+            summary.clone(),
+            tx.clone(),
+            sem.clone(),
+        );
     }
 
     let mut pending: BTreeMap<usize, (Vec<IndexedLine>, u128)> = BTreeMap::new();
@@ -170,7 +183,13 @@ where
                             start_idx + 1,
                             end
                         );
-                        spawn_batch(job.clone(), translator.clone(), summary.clone(), tx.clone());
+                        spawn_batch(
+                            job.clone(),
+                            translator.clone(),
+                            summary.clone(),
+                            tx.clone(),
+                            sem.clone(),
+                        );
                         continue;
                     }
                 }
@@ -185,7 +204,13 @@ where
                         end,
                         err
                     );
-                    spawn_batch(job.clone(), translator.clone(), summary.clone(), tx.clone());
+                    spawn_batch(
+                        job.clone(),
+                        translator.clone(),
+                        summary.clone(),
+                        tx.clone(),
+                        sem.clone(),
+                    );
                 }
                 continue;
             }
@@ -442,11 +467,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("orig.srt");
-        fs::write(
-            &path,
-            "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n",
-        )
-        .unwrap();
+        fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n").unwrap();
         let tr = FlakyTr {
             attempts: Arc::new(Mutex::new(0)),
         };
@@ -495,16 +516,79 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("orig.srt");
-        fs::write(
-            &path,
-            "1\n00:00:00,000 --> 00:00:01,000\nhi\n\n",
-        )
-        .unwrap();
+        fs::write(&path, "1\n00:00:00,000 --> 00:00:01,000\nhi\n\n").unwrap();
         let tr = LazyTr {
             attempts: Arc::new(Mutex::new(0)),
         };
         let out = process_file(&path, tr, 50).await.unwrap();
         let translated = fs::read_to_string(out).unwrap();
         assert!(translated.contains("pt:hi"));
+    }
+
+    /// Ensure no more than four batches run concurrently.
+    #[tokio::test]
+    async fn limits_concurrent_batches() {
+        #[derive(Clone)]
+        struct CountingTr {
+            current: Arc<Mutex<u32>>,
+            max: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl Translator for CountingTr {
+            /// Pretend to build a glossary by returning a dummy summary.
+            async fn build_glossary(&self, _sample: &[String]) -> Result<String> {
+                Ok("sum".into())
+            }
+
+            /// Count concurrent translations and track the maximum.
+            async fn translate_batch(
+                &self,
+                _summary: &str,
+                _prev: &[String],
+                lines: &[IndexedLine],
+                _target_locale: &str,
+            ) -> Result<Vec<IndexedLine>> {
+                {
+                    let mut curr = self.current.lock().unwrap();
+                    *curr += 1;
+                    let mut max = self.max.lock().unwrap();
+                    if *curr > *max {
+                        *max = *curr;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                {
+                    let mut curr = self.current.lock().unwrap();
+                    *curr -= 1;
+                }
+                Ok(lines
+                    .iter()
+                    .map(|l| IndexedLine {
+                        index: l.index,
+                        text: format!("pt:{}", l.text),
+                    })
+                    .collect())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("orig.srt");
+        let mut content = String::new();
+        for i in 0..8 {
+            content.push_str(&format!(
+                "{}\n00:00:{:02},000 --> 00:00:{:02},500\nline{}\n\n",
+                i + 1,
+                i,
+                i,
+                i + 1
+            ));
+        }
+        fs::write(&path, content).unwrap();
+        let tr = CountingTr {
+            current: Arc::new(Mutex::new(0)),
+            max: Arc::new(Mutex::new(0)),
+        };
+        let _out = process_file(&path, tr.clone(), 1).await.unwrap();
+        assert!(*tr.max.lock().unwrap() <= MAX_CONCURRENT_BATCHES as u32);
     }
 }
