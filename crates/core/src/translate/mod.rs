@@ -154,10 +154,19 @@ where
         match res {
             Ok(translated) => {
                 if let Some(job) = jobs.get(&start_idx) {
-                    if translated.len() != job.lines.len() {
+                    // In this branch we check if the translator returned the
+                    // expected amount of lines and that each line actually
+                    // changed. If something is off, we spawn the job again so
+                    // the user never gets a partially translated file.
+                    if translated.len() != job.lines.len()
+                        || translated
+                            .iter()
+                            .zip(job.lines.iter())
+                            .any(|(t, o)| t.text == o.text)
+                    {
                         let end = start_idx + job.lines.len();
                         info!(
-                            "retrying lines {}-{} due to incomplete response",
+                            "retrying lines {}-{} due to incomplete translation",
                             start_idx + 1,
                             end
                         );
@@ -204,14 +213,6 @@ where
             let done = next * 100 / total;
             info!("completed {done}%");
         }
-    }
-
-    if blocks
-        .iter()
-        .zip(english_blocks.iter())
-        .any(|(b, e)| b.text == e.text)
-    {
-        return Err(anyhow!("some lines were not translated"));
     }
 
     let out_path = if is_srt {
@@ -452,5 +453,58 @@ mod tests {
         let out = process_file(&path, tr, 50).await.unwrap();
         let translated = fs::read_to_string(out).unwrap();
         assert!(translated.contains("pt:hello"));
+    }
+
+    /// Ensure we retry when the translator returns the same lines without translating.
+    #[tokio::test]
+    async fn retries_untranslated_lines() {
+        #[derive(Clone)]
+        struct LazyTr {
+            attempts: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl Translator for LazyTr {
+            /// Pretend to build a glossary by returning a dummy summary.
+            async fn build_glossary(&self, _sample: &[String]) -> Result<String> {
+                Ok("sum".into())
+            }
+
+            /// First return the input unchanged, then prefix it with `pt:`.
+            async fn translate_batch(
+                &self,
+                _summary: &str,
+                _prev: &[String],
+                lines: &[IndexedLine],
+                _target_locale: &str,
+            ) -> Result<Vec<IndexedLine>> {
+                let mut lock = self.attempts.lock().unwrap();
+                if *lock == 0 {
+                    *lock += 1;
+                    Ok(lines.to_vec())
+                } else {
+                    Ok(lines
+                        .iter()
+                        .map(|l| IndexedLine {
+                            index: l.index,
+                            text: format!("pt:{}", l.text),
+                        })
+                        .collect())
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("orig.srt");
+        fs::write(
+            &path,
+            "1\n00:00:00,000 --> 00:00:01,000\nhi\n\n",
+        )
+        .unwrap();
+        let tr = LazyTr {
+            attempts: Arc::new(Mutex::new(0)),
+        };
+        let out = process_file(&path, tr, 50).await.unwrap();
+        let translated = fs::read_to_string(out).unwrap();
+        assert!(translated.contains("pt:hi"));
     }
 }
